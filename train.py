@@ -33,7 +33,7 @@ alpha = 0.1
 gamma = 0.99   
 lam = 0.3
 
-print("Training startet... (ca. 1-2 Minuten)")
+print("Training")
 
 for episode in range(episodes):
     state, _ = env.reset()
