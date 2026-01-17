@@ -2,51 +2,31 @@ import gymnasium
 import flappy_bird_gymnasium
 import numpy as np
 import random
-
+import utils
 
 env = gymnasium.make("FlappyBird-v0", render_mode=None, use_lidar=False)
-horiz_bins = np.array([-0.1, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0])
-vert_bins = np.array([
-    -0.5, -0.3, -0.2, 
-    -0.15, -0.1, -0.075, -0.05, -0.025,  # Sehr fein UNTER der Mitte (Vogel fällt oft hier)
-    0.0, 
-    0.025, 0.05, 0.075, 0.1, 0.15,      # Sehr fein ÜBER der Mitte
-    0.2, 0.3, 0.5
-])
-vel_bins = np.array([-4.0, -3.0, -2.5, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.5, 3.0])
 
-state_dims = (len(horiz_bins)+1, len(vert_bins)+1, len(vel_bins)+1)
-q_table = np.full(state_dims + (env.action_space.n,), 0.5)
+q_table = np.full(list(utils.STATE_DIMS) + [env.action_space.n], 0.1)
 
-def get_discrete_state(state):
-    horiz_dist = state[3]
-    gap_center_y = (state[5] + 0.1) - 0.04 
-    
-    vert_dist = gap_center_y - state[9] 
-    velocity = state[10]
-    
-    x = np.digitize(horiz_dist, horiz_bins)
-    y = np.digitize(vert_dist, vert_bins)
-    v = np.digitize(velocity, vel_bins)
-    
-    return (x, y, v)
-
-#Hyperparameters
-episodes = 100000   
+episodes = 60000
 epsilon = 1.0          
-epsilon_min = 0.0001
-epsilon_decay = 0.9997 
-alpha = 0.05    
+epsilon_min = 0.0
+epsilon_decay = 0.9995 
+alpha = 0.1
 gamma = 0.99   
 lam = 0.7
 
+eligibility_trace = np.zeros_like(q_table)
 
 print("Training")
 
 for episode in range(episodes):
     state, _ = env.reset()
-    state_disc = get_discrete_state(state)
+    state_disc = utils.get_discrete_state(state)
     
+    eligibility_trace.fill(0)
+    
+    # Epsilon Greedy
     if random.random() < epsilon:
         action = env.action_space.sample()
     else:
@@ -55,63 +35,71 @@ for episode in range(episodes):
     terminated = False
     step_count = 0
     
-    # Eligibility Trace
-    eligibility_trace = np.zeros_like(q_table)
-
     while not terminated:
-        next_state, reward_env, terminated, truncated, info = env.step(action)
-        next_state_disc = get_discrete_state(next_state)
-
         # --- REWARD SYSTEM ---
-        vert_diff = next_state[5] - next_state[9]
+        next_state, reward_env, terminated, truncated, info = env.step(action)
+        
+        # Frame Skipping: If we flapped (action 1), coast for a few frames
+        if action == 1 and not terminated:
+            frames_to_skip = 2 
+            for _ in range(frames_to_skip):
+                if terminated: break
+                # Skip frame with action 0 (do nothing)
+                next_state_s, reward_s, terminated_s, truncated_s, info_s = env.step(0)
+                reward_env += reward_s
+                next_state = next_state_s # Update next_state to the latest
+                terminated = terminated_s or terminated
+                truncated = truncated_s or truncated
+
+        next_state_disc = utils.get_discrete_state(next_state)
 
         if terminated:
-            reward = -500 
-        elif reward_env > 0.9: 
-            reward = 200  
-        elif reward_env < 0:
-            reward = reward_env
+            reward = -1000 
+        elif reward_env > 0.9: # This might need adjustment if we sum rewards
+            reward = 500  
         else:
             reward = 0.1
-
-        #Epsilon-Greedy
+        
         if random.random() < epsilon:
             next_action = env.action_space.sample()
         else:
             next_action = np.argmax(q_table[next_state_disc])
 
-        # SARSA(Lambda) Update
-        # 1. TD-Fehler
+        # --- SARSA(Lambda) UPDATE ---
+        
+        # 1. TD-Error
         current_q = q_table[state_disc + (action,)]
         if terminated:
-             target = reward
+            target = reward
         else:
-             next_q_val = q_table[next_state_disc + (next_action,)]
-             target = reward + gamma * next_q_val
+            target = reward + gamma * q_table[next_state_disc + (next_action,)]
         
         delta = target - current_q
 
-        # 2. Eligibility Trace increment
-        # Accumulating Traces
-        eligibility_trace[state_disc + (action,)] += 1
+        # 2. Eligibility Trace Update (REPLACING TRACES)
+        eligibility_trace[state_disc + (action,)] = 1.0
 
         # 3. Q-Table Update
         q_table += alpha * delta * eligibility_trace
 
-        # 4. Eligibility Trace Decay
-        eligibility_trace *= gamma * lam
+        # 4. Trace Decay
+        eligibility_trace *= (gamma * lam)
+        
+        # Performance
+        if step_count % 10 == 0:
+             eligibility_trace[eligibility_trace < 0.01] = 0
 
         state_disc = next_state_disc
         action = next_action
         step_count += 1
     
+    
     if epsilon > epsilon_min:
         epsilon *= epsilon_decay
 
-    if episode % 2000 == 0:
+    if episode % 1000 == 0:
         print(f"Episode: {episode}, Score: {step_count}, Epsilon: {epsilon:.4f}")
 
-
 np.save("brain.npy", q_table)
-print("Training done")
+print("Training finish")
 env.close()
