@@ -1,26 +1,45 @@
-import numpy as np
-
-horiz_bins = np.array([-0.1, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0])
-vert_bins = np.array([
-    -0.5, -0.3, -0.2, 
-    -0.15, -0.1, -0.075, -0.05, -0.025,  # Sehr fein UNTER der Mitte (Vogel fällt oft hier)
-    0.0, 
-    0.025, 0.05, 0.075, 0.1, 0.15,      # Sehr fein ÜBER der Mitte
-    0.2, 0.3, 0.5
-])
-vel_bins = np.array([-9.0, -7.0, -5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 4.0, 6.0])
-
-STATE_DIMS = (len(horiz_bins)+1, len(vert_bins)+1, len(vel_bins)+1)
-
+import math
 
 def get_discrete_state(state):
-    horiz_dist = state[3]
-    target_y = (state[5] + 0.1) - 0.09 
-    vert_dist = target_y - state[9] 
+    """
+    Discretizes the state using the FlapAI Bird paper methodology:
+    discretized = rounding * math.floor(value / rounding)
+    
+    State mapping from FlappyBird-v0:
+    0: last_pipe_x
+    1: last_pipe_y
+    2: last_pipe_y_bottom
+    3: next_pipe_x (dist_x)
+    4: next_pipe_y_top
+    5: next_pipe_y_bottom
+    6: next_next_pipe_x
+    7: next_next_pipe_y_top
+    8: next_next_pipe_y_bottom
+    9: player_y
+    10: player_vel
+    11: player_rot
+    """
+    
+    # Extract raw features
+    dist_x = state[3]
+    
+    # Calculate Dist Y to GAP CENTER (Player Y - (Pipe Bottom Y + 0.1))
+    # Pipe Gap is usually 0.2, so center is Bottom + 0.1
+    pipe_gap_center = state[5] #+ 0.05
+    dist_y = state[9] - pipe_gap_center
+    
     velocity = state[10]
     
-    x = np.digitize(horiz_dist, horiz_bins)
-    y = np.digitize(vert_dist, vert_bins)
-    v = np.digitize(velocity, vel_bins)
+    # Discretization parameters
+    round_x = 0.15
+    round_y = 0.1
+    round_v = 1.0
     
-    return (x, y, v)
+    # Apply formula
+    d_x = round_x * math.floor(dist_x / round_x)
+    d_y = round_y * math.floor(dist_y / round_y)
+    d_v = round_v * math.floor(velocity / round_v)
+    
+    # Return as tuple for dictionary key
+    # Rounding to avoids floating point weirdness in keys (optional but good practice)
+    return (round(d_x, 2), round(d_y, 2), round(d_v, 2))

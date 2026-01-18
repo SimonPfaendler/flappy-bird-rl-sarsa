@@ -3,116 +3,125 @@ import flappy_bird_gymnasium
 import numpy as np
 import random
 import utils
+import pickle
+import os
+from collections import defaultdict
 
+# Create Environment
 env = gymnasium.make("FlappyBird-v0", render_mode=None, use_lidar=False)
 
-q_table = np.full(list(utils.STATE_DIMS) + [env.action_space.n], 0.1)
+# Hyperparameters
+episodes = 20000
+alpha = 0.1         # Learning rate
+gamma = 0.98        # Discount factor
+epsilon = 0.0       # Greedy policy (exploration via optimistic init)
+init_q = 0.0        # Optimistic Initialization
+lam = 0.9           # Lambda for eligibility traces
+trace_min = 0.01    # Threshold to prune traces
 
-episodes = 60000
-epsilon = 1.0          
-epsilon_min = 0.0
-epsilon_decay = 0.9995 
-alpha = 0.1
-gamma = 0.99   
-lam = 0.8
+# Q-Table as defaultdict
+# Returns a list of [Q(s,0), Q(s,1)] initialized to init_q
+q_table = defaultdict(lambda: [init_q, init_q])
 
-eligibility_trace = np.zeros_like(q_table)
-
+# Training Metrics
 scores_history = []
+best_score = 0
 
-print("Training")
+print(f"Starting Training: Q-Learning with Traces (Alpha={alpha}, Gamma={gamma}, InitQ={init_q}, Lambda={lam})")
 
-for episode in range(episodes):
-    state, _ = env.reset()
-    state_disc = utils.get_discrete_state(state)
-    
-    eligibility_trace.fill(0)
-    
-    # Epsilon Greedy
-    if random.random() < epsilon:
-        action = env.action_space.sample()
-    else:
-        action = np.argmax(q_table[state_disc])
-
-    terminated = False
-    step_count = 0
-    
-    while not terminated:
-        # --- REWARD SYSTEM ---
-        next_state, reward_env, terminated, truncated, info = env.step(action)
+try:
+    for episode in range(episodes):
+        state, _ = env.reset()
+        current_state_key = utils.get_discrete_state(state)
         
-        # Frame Skipping: If we flapped (action 1), coast for a few frames
-        if action == 1 and not terminated:
-            frames_to_skip = 2 
-            for _ in range(frames_to_skip):
-                if terminated: break
-                # Skip frame with action 0 (do nothing)
-                next_state_s, reward_s, terminated_s, truncated_s, info_s = env.step(0)
-                reward_env += reward_s
-                next_state = next_state_s # Update next_state to the latest
-                terminated = terminated_s or terminated
-                truncated = truncated_s or truncated
+        # Eligibility Traces: Map state -> [trace_action_0, trace_action_1]
+        traces = defaultdict(lambda: [0.0, 0.0])
+        
+        terminated = False
+        truncated = False
+        step_count = 0
+        total_reward = 0
+        
+        while not (terminated or truncated):
+            # Select Action: Greedy (due to epsilon=0.0)
+            # Break ties randomly
+            q_values = q_table[current_state_key]
+            if q_values[0] == q_values[1]:
+                action = random.choice([0, 1])
+            else:
+                action = np.argmax(q_values)
                 
-                # Decay traces for the skipped step
-                eligibility_trace *= (gamma * lam)
-                eligibility_trace[eligibility_trace < 0.01] = 0
-
-        next_state_disc = utils.get_discrete_state(next_state)
-
-        if terminated:
-            reward = -1000 
-        elif reward_env > 0.9: # This might need adjustment if we sum rewards
-            reward = 500  
-        else:
-            reward = 0.1
+            
+            next_state, reward, terminated, truncated, info = env.step(action)
+            
+            # Custom Reward Logic
+            if terminated:
+                reward = -1000.0
+            elif reward > 1.0: # Passed a pipe
+                reward = 5.0
+            else:
+                reward = 0.5 # Survival reward per frame
+                
+            total_reward += reward
+            
+            # Discretize Next State
+            next_state_key = utils.get_discrete_state(next_state)
+            
+            # --- Q-Learning with Eligibility Traces ---
+            
+            # 1. Calculate TD Error
+            # delta = R + gamma * max_a(Q(s', a)) - Q(s, a)
+            current_q = q_table[current_state_key][action]
+            max_next_q = np.max(q_table[next_state_key])
+            delta = reward + gamma * max_next_q - current_q
+            
+            # 2. Update Eligibility Trace for current state (Replacing Traces)
+            traces[current_state_key][action] = 1.0
+            
+            # 3. Update Q-values and Decay Traces for ALL active states
+            # To optimize, we iterate over the copy of keys or items to allow modification/deletion
+            # OR we create a list of keys to remove
+            keys_to_remove = []
+            
+            for state_key, trace_values in traces.items():
+                # We update both actions for the state if they have traces
+                for a in range(2):
+                    if trace_values[a] > trace_min:
+                        # Update Q-Value
+                        q_table[state_key][a] += alpha * delta * trace_values[a]
+                        
+                        # Decay Trace
+                        traces[state_key][a] *= (gamma * lam)
+                    else:
+                        # Just ensure it's zero if it fell below threshold logic previously (or was 0)
+                        traces[state_key][a] = 0.0
+                
+                # If both traces are practically zero, mark for removal to keep dict small
+                if traces[state_key][0] <= trace_min and traces[state_key][1] <= trace_min:
+                     keys_to_remove.append(state_key)
+                     
+            # Cleanup
+            for key in keys_to_remove:
+                del traces[key]
+            
+            # Move to next state
+            current_state_key = next_state_key
+            step_count += 1
+            
+        scores_history.append(step_count)
+        if step_count > best_score:
+            best_score = step_count
         
-        if random.random() < epsilon:
-            next_action = env.action_space.sample()
-        else:
-            next_action = np.argmax(q_table[next_state_disc])
+        # Logging
+        if episode % 1000 == 0:
+            avg_score = np.mean(scores_history[-100:]) if scores_history else 0
+            print(f"Episode: {episode}, Score: {step_count}, Best Score: {best_score}, Avg Score: {avg_score:.2f}, Q-Table Size: {len(q_table)}")
+            
+except KeyboardInterrupt:
+    print("Training Interrupted by User")
 
-        # --- SARSA(Lambda) UPDATE ---
-        
-        # 1. TD-Error
-        current_q = q_table[state_disc + (action,)]
-        if terminated:
-            target = reward
-        else:
-            target = reward + gamma * q_table[next_state_disc + (next_action,)]
-        
-        delta = target - current_q
-
-        # 2. Eligibility Trace Update (REPLACING TRACES)
-        eligibility_trace[state_disc + (action,)] = 1.0
-
-        # 3. Q-Table Update
-        q_table += alpha * delta * eligibility_trace
-
-        # 4. Trace Decay
-        eligibility_trace *= (gamma * lam)
-        
-        # Performance
-        if step_count % 10 == 0:
-             eligibility_trace[eligibility_trace < 0.01] = 0
-
-        state_disc = next_state_disc
-        action = next_action
-        step_count += 1
-    
-    scores_history.append(step_count)
-    if len(scores_history) > 100:
-        scores_history.pop(0)
-
-    if epsilon > epsilon_min:
-        epsilon *= epsilon_decay
-
-    if alpha > 0.01:
-        alpha *= 0.99995
-
-    if episode % 1000 == 0:
-        avg_score = np.mean(scores_history)
-        print(f"Episode: {episode}, Score: {step_count}, Avg Score: {avg_score:.2f}, Epsilon: {epsilon:.4f}, Alpha: {alpha:.2f}")
-
-np.save("brain.npy", q_table)
-print("Training finish")
+# Final Save
+with open("q_table.pkl", "wb") as f:
+    pickle.dump(dict(q_table), f)
+print("Training Completed & Saved to q_table.pkl")
 env.close()
