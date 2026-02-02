@@ -1,3 +1,5 @@
+
+# utils.py
 import math
 
 def get_discrete_state(state):
@@ -23,7 +25,8 @@ def get_discrete_state(state):
     # Extract raw features
     dist_x = state[3]
     
-    dist_y = state[9] - state[5]
+    dist_y = state[9] - (state[5] + 0.01)
+    
     
     velocity = state[10]
     

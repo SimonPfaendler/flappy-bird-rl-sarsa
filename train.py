@@ -1,3 +1,5 @@
+
+# train.py
 import gymnasium
 import flappy_bird_gymnasium
 import numpy as np
@@ -10,13 +12,14 @@ from collections import defaultdict
 env = gymnasium.make("FlappyBird-v0", render_mode=None, use_lidar=False)
 
 # Hyperparameters
-episodes = 20000
-alpha = 0.3        # Learning rate
+episodes = 10000
+alpha = 0.07        # Learning rate
 gamma = 0.99        # Discount factor
 epsilon = 0.0       # Greedy policy (exploration via optimistic init)
-init_q = 1000        # Optimistic Initialization
-lam = 0.8           # Lambda for eligibility traces
+init_q = 0.1        # Optimistic Initialization
+lam = 0.7           # Lambda for eligibility traces
 trace_min = 0.01    # Threshold to prune traces
+jump_skip_frames = 3 # Frames to skip after a jump
 
 # Q-Table as defaultdict
 # Returns a list of [Q(s,0), Q(s,1)] initialized to init_q
@@ -24,7 +27,6 @@ q_table = defaultdict(lambda: [init_q, init_q])
 
 # Training Metrics
 scores_history = []
-pipe_history = []
 best_score = 0
 best_pipes = 0
 
@@ -53,17 +55,35 @@ try:
                 action = np.argmax(q_values)
                 
             
-            next_state, reward, terminated, truncated, info = env.step(action)
+            # Execute Action with Frameskipping
+            accumulated_reward = 0
             
-            # Custom Reward Logic
-            if terminated:
-                reward = -1000
-            elif reward >= 1.0: # Passed a pipe
-                reward = 5
-                score += 1
-            else:
-                reward = 1 # Survival reward per frame
+            # If action is 1 (jump), we execute 1 jump then skip some frames
+            n_steps = (jump_skip_frames + 1) if action == 1 else 1
+            
+            for i in range(n_steps):
+                # Action is applied only on the first step of the sequence
+                # For subsequent steps (skipping), we do nothing (action 0)
+                actual_action = action if i == 0 else 0
                 
+                next_state, r, terminated, truncated, info = env.step(actual_action)
+                
+                # Custom Reward Logic
+                if terminated:
+                    r = -1000
+                elif r >= 1.0: # Passed a pipe
+                    r = 50.0
+                    score += 1
+                else:
+                    r = 1 # Survival reward per frame
+                    
+                accumulated_reward += r
+                step_count += 1
+                
+                if terminated or truncated:
+                    break
+            
+            reward = accumulated_reward
             total_reward += reward
             
             # Discretize Next State
@@ -112,10 +132,9 @@ try:
             
             # Move to next state
             current_state_key = next_state_key
-            step_count += 1
+            # step_count updated in loop
             
         scores_history.append(step_count)
-        pipe_history.append(score)
         if step_count > best_score:
             best_score = step_count
             
@@ -125,14 +144,13 @@ try:
         # Logging
         if episode % 1000 == 0:
             avg_score = np.mean(scores_history[-100:]) if scores_history else 0
-            avg_pipe = np.mean(pipe_history[-100:]) if pipe_history else 0
             
             # Alpha Decay on High Score
             if avg_score > 120.0:
-                alpha = max(0.001, alpha * 0.95)
+                alpha = max(0.005, alpha * 0.9)
                 print(f"High Avg Score! Decayed Alpha to {alpha:.4f}")
                 
-            print(f"Episode: {episode}, Score: {step_count}, Best Score: {best_score}, Best Pipes: {best_pipes}, Avg Score: {avg_score:.2f}, Pipe: {score}, Avg Pipe: {avg_pipe}, Alpha: {alpha:.4f}, Q-Table Size: {len(q_table)}")
+            print(f"Episode: {episode}, Score: {step_count}, Best Score: {best_score}, Best Pipes: {best_pipes}, Avg Score: {avg_score:.2f}, Pipe: {score}, Alpha: {alpha:.4f}, Q-Table Size: {len(q_table)}")
             
 except KeyboardInterrupt:
     print("Training Interrupted by User")
